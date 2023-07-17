@@ -11,7 +11,7 @@ import time
 import numpy
 import torch
 
-from logging import Logger
+from logging_myin25 import Logger
 
 from tqdm import tqdm
 
@@ -39,18 +39,19 @@ class DefinitelyNotBPNet(torch.nn.Module):
 
         self.fc1 = torch.nn.Linear(8, 64)
         self.fc2 = torch.nn.Linear(64, 1)
+        self.relu = torch.nn.ReLU()
 
         self.logger = Logger(["Epoch", "Iteration", "Training Time",
             "Training MNLL", "Training Count MSE", 
             "Validation Count Pearson", "Validation Count MSE", 
             "Saved?"], 
-            verbose=verbose)
+            verbose=False)
 
 
-    def forward(self, X, X_ctl=None):
+    def forward(self, x, X_ctl=None):
         # counts prediction
         x = self.fc1(x)
-        x = F.relu(x)
+        x = self.relu(x)
         x = self.fc2(x)
 
         return x
@@ -187,6 +188,8 @@ class DefinitelyNotBPNet(torch.nn.Module):
                 optimizer.zero_grad()
                 self.train()
 
+                print(X)
+                print(X.shape)
                 # Run forward pass
                 y_counts = self(X)
 

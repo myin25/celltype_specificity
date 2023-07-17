@@ -186,18 +186,11 @@ class DataGenerator(torch.utils.data.Dataset):
 		i = self.random_state.choice(len(self.sequences))
 		j = 0 if self.max_jitter == 0 else self.random_state.randint(self.max_jitter*2) 
 
-		X = self.sequences[i][:, j:j+self.in_window]
-		y = self.signals[i][:, j:j+self.out_window]
+		X = self.sequences[i]
+		y = self.signals[i]
 
 		if self.controls is not None:
-			X_ctl = self.controls[i][:, j:j+self.in_window]
-
-		if self.reverse_complement and self.random_state.choice(2) == 1:
-			X = torch.flip(X, [0, 1])
-			y = torch.flip(y, [0, 1])
-
-			if self.controls is not None:
-				X_ctl = torch.flip(X_ctl, [0, 1])
+			X_ctl = self.controls[i]
 
 		if self.controls is not None:
 			return X, X_ctl, y
@@ -429,6 +422,130 @@ def extract_loci(loci, sequences, signals=None, controls=None, chroms=None,
 
 		return seqs			
 
+def extract_signals(loci, sequences, signals=None, controls=None, chroms=None, 
+    in_window=2114, out_window=1000, max_jitter=0, min_counts=None,
+    max_counts=None, n_loci=None, verbose=False):
+    
+    # print(loci)
+    # print(signals)
+    
+    seqs, signals_, controls_ = [], [], []
+    in_width, out_width = in_window // 2, out_window // 2
+
+
+    names = ['chrom', 'start', 'end']
+    if not isinstance(loci, (tuple, list)):
+        loci = [loci]
+
+    loci_dfs = []
+    for i, df in enumerate(loci):
+        if isinstance(df, str):
+            try:
+                df = pandas.read_csv(df, sep='\t', usecols=[0, 1, 2], 
+                    header=None, index_col=False, names=names)
+            except:
+                print("File Doesn't Exist!")
+                return
+            df['idx'] = numpy.arange(len(df)) * len(loci) + i
+        loci_dfs.append(df)
+
+    loci = pandas.concat(loci_dfs).set_index("idx").sort_index().reset_index(drop=True)
+
+    if chroms is not None:
+        loci = loci[numpy.isin(loci['chrom'], chroms)]
+
+    # Load the signal and optional control tracks if filenames are given
+    _signals = []
+    if signals is not None:
+        for i, signal in enumerate(signals):
+            if isinstance(signal, str):
+                try:
+                    signal = pyBigWig.open(signal)
+                except:
+                    print("Null File")
+                    return
+            _signals.append(signal)
+
+        signals = _signals
+
+    _controls = []
+    if controls is not None:
+        for i, control in enumerate(controls):
+            if isinstance(control, str):
+                control = pyBigWig.open(control, "r")
+            _controls.append(control)
+
+        controls = _controls
+
+    desc = "Loading Loci"
+    d = not verbose
+
+    max_width = max(in_width, out_width)
+    loci_count = 0
+
+    # print(loci)
+    # print(loci.values)
+    for chrom, start, end in tqdm(loci.values, disable=d, desc=desc):
+        mid = start + (end - start) // 2
+
+        if start - max_width - max_jitter < 0:
+            continue
+
+        if n_loci is not None and loci_count == n_loci:
+            break 
+
+        start = mid - out_width - max_jitter
+        end = mid + out_width + max_jitter
+
+        # Extract the signal from each of the signal files
+        if signals is not None:
+            signals_.append([])
+            for signal in signals:
+                if isinstance(signal, dict):
+                    signal_ = signal[chrom][start:end]
+                else:
+                    try:
+                        signal_ = signal.values(chrom, start, end, numpy=True)
+                        signal_ = numpy.nan_to_num(signal_)
+                    except:
+                        print("error with interval bounds")
+                        print(signal)
+                        print(chrom)
+                        print(start)
+                        print(end)
+                        print(signals_)
+
+                signals_[-1].append(signal_)
+
+        # For the sequences and controls extract a window the size of the input
+        start = mid - in_width - max_jitter
+        end = mid + in_width + max_jitter
+
+        # Extract the controls from each of the control files
+        if controls is not None:
+            controls_.append([])
+            for control in controls:
+                if isinstance(control, dict):
+                    control_ = control[chrom][start:end]
+                else:
+                    control_ = control.values(chrom, start, end, numpy=True)
+                    control_ = numpy.nan_to_num(control_)
+
+                controls_[-1].append(control_)
+
+        loci_count += 1
+
+    if signals is not None:
+        signals_ = torch.tensor(numpy.array(signals_), dtype=torch.float32)
+
+        idxs = torch.ones(signals_.shape[0], dtype=torch.bool)
+        if max_counts is not None:
+            idxs = (idxs) & (signals_.sum(dim=(1, 2)) < max_counts)
+        if min_counts is not None:
+            idxs = (idxs) & (signals_.sum(dim=(1, 2)) > min_counts)
+
+        return signals_[idxs]
+
 
 def PeakGenerator(loci, sequences, signals, controls=None, chroms=None, 
 	in_window=2114, out_window=1000, max_jitter=128, reverse_complement=True, 
@@ -517,18 +634,41 @@ def PeakGenerator(loci, sequences, signals, controls=None, chroms=None,
 		A PyTorch DataLoader wrapped DataGenerator object.
 	"""
 
-	X = extract_loci(loci=loci, sequences=sequences, signals=signals, 
-		controls=controls, chroms=chroms, in_window=in_window, 
-		out_window=out_window, max_jitter=max_jitter, min_counts=min_counts,
-		max_counts=max_counts, verbose=verbose)
+	histone_signals = []
+    
+	# Iterate through each bigWig
+	for signal in signals[:-1:]:
+		#print(signal)
+		if signal == "": # Empty file
+			#print("Empty file.")
+			histone_signals.append(torch.empty(1, histone_signals[0].shape[1]).fill_(0)[None, ...])
+		else: # Extract histone signal and add to list
+			histone_signals.append(extract_signals(loci=loci, sequences=sequences, signals=[signal], controls=None, chroms=chroms)[None, ...])
+		#print(histone_signals[-1].shape)
+		#print(histone_signals[-1])# Print out extracted signals
+
+	# Join histone_signals together
+	histone_signals_ = torch.cat(histone_signals, 0)
+    
+	#print(signals[-1])
+	histone_signals_ = torch.permute(histone_signals_, (1, 0, 2, 3)).squeeze()
+	histone_signals_ = torch.sum(histone_signals_, dim=-1)
+    
+	init_signals = extract_signals(loci=loci, sequences=sequences, signals=signals[-1], controls=None, chroms=chroms)
+	#print(init_signals.shape)
+	init_signals = torch.sum(torch.sum(init_signals, dim=-1), dim=-1)
+	#print(init_signals.shape)
+	#print("histone_signals_")
+	#print(histone_signals_.shape)
+	#print(histone_signals_)
+	#print(init_signals)
 
 	if controls is not None:
 		sequences, signals_, controls_ = X
 	else:
-		sequences, signals_ = X
 		controls_ = None
 
-	X_gen = DataGenerator(sequences, signals_, controls=controls_, 
+	X_gen = DataGenerator(histone_signals_, init_signals, controls=controls_, 
 		in_window=in_window, out_window=out_window, max_jitter=max_jitter,
 		reverse_complement=reverse_complement, random_state=random_state)
 
