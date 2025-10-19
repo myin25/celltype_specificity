@@ -1,4 +1,4 @@
-# BPNetImplementation.py
+# bpnet.py
 # Author: Melody Yin <yinmelody8@gmail.com>
 # Author: Jacob Schreiber <jmschreiber91@gmail.com>
 
